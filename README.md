@@ -10,9 +10,9 @@
 
 ## Текущий этап
 
-Подготовлено окружение, проверка подключения и инициализация raw SQL-базы:
-три таблицы с ограничениями и демонстрационные данные.
-Операции приложения и консольное меню добавим следующими коммитами.
+Подготовлена raw SQL-база, CRUD-функции мероприятий и мест и поиск.
+Функции вызываем из консоли Python. После реализации бронирования и отмены
+добавим консольное меню, которое объединит операции в приложение.
 План занятия и этапы реализации описаны в [docs/practice_plan.md](docs/practice_plan.md).
 
 ## Подготовка
@@ -226,6 +226,59 @@ JOIN events ON events.id = seats.event_id;
 За это отвечают `UNIQUE`, `FOREIGN KEY`, `ON DELETE CASCADE` и `ON DELETE RESTRICT`.
 Номера больше нуля и непустые строки проверяются через `CHECK`.
 Подробнее: [ограничения PostgreSQL](https://www.postgresql.org/docs/current/ddl-constraints.html).
+
+### 7. CRUD и поиск из консоли Python
+
+После подготовки базы откройте консоль Python из корня проекта командой
+`python`. Вызывайте функции отдельно:
+
+```pycon
+>>> from datetime import datetime
+>>> from ticket_booking.config import get_database_url
+>>> from ticket_booking.raw_sql import events, seats
+>>> database_url = get_database_url()
+>>> all_events = events.list_events(database_url)
+>>> jazz_events = events.search_events(database_url, title_part="джаз")
+>>> small_hall_events = events.search_events(database_url, venue_part="Малый")
+>>> matching_events = events.find_events_by_seat(database_url, 1, 1)
+>>> event_id = events.add_event(database_url, "Встреча с автором", "Малый зал", datetime(2026, 12, 1, 18, 0))
+>>> seat_id = seats.add_seat(database_url, event_id, 1, 1)
+>>> event_seats = seats.list_seats(database_url, event_id)
+>>> seat = seats.find_seat(database_url, event_id, 1, 1)
+>>> print(seat["row_number"], seat["seat_number"])
+1 1
+>>> events.update_event(database_url, event_id, "Встреча с писателем", "Малый зал", datetime(2026, 12, 1, 19, 0))
+True
+>>> seats.update_seat(database_url, seat_id, 1, 2)
+True
+>>> seats.delete_seat(database_url, seat_id)
+True
+>>> events.delete_event(database_url, event_id)
+True
+```
+
+При поиске по названию и площадке оба условия применяются одновременно.
+Пустая строка означает любое значение. `ILIKE` ищет без учета регистра;
+`%` и `_` в поисковой строке имеют значение шаблонов SQL.
+Поиск мероприятий по ряду и номеру учитывает и занятые места;
+список свободных мест добавим вместе с бронированием.
+
+Функции добавления возвращают ID новой записи, изменения и удаления – `True`,
+если запись найдена, иначе `False`. Поиск одного места возвращает словарь
+или `None`, выборки нескольких записей возвращают список словарей.
+Для этого в запросах чтения используется `row_factory=dict_row`:
+к полю обращаемся по имени, например `event["title"]`.
+Подробнее: [результаты запросов Psycopg](https://www.psycopg.org/psycopg3/docs/advanced/rows.html).
+
+Значения передаются вторым аргументом `cursor.execute()`, а в SQL обозначаются
+через `%s`. В поиске f-строка формирует значение шаблона, которое тоже передается
+отдельным параметром. Подробнее: [параметры запросов Psycopg](https://www.psycopg.org/psycopg3/docs/basic/params.html).
+
+У мероприятия с билетами можно менять название и дату, но смена площадки
+вызывает `ValueError`. Место с билетом нельзя редактировать.
+Редактирование места меняет его ряд и номер в пределах текущего мероприятия.
+При нарушении ограничений таблиц возникает исключение Psycopg.
+Каждая операция выполняется в отдельной транзакции через `with`.
 
 ## Учебные границы
 
