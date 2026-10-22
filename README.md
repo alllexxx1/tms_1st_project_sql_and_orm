@@ -12,7 +12,8 @@
 
 Версия на raw SQL готова: CRUD мероприятий и мест, поиск, свободные места,
 бронирование и отмена билетов. Все операции вызываем как отдельные функции
-из консоли Python. Следующий этап – модели SQLAlchemy и миграции Alembic.
+из консоли Python. Для ORM подготовлены модели, первая миграция Alembic
+и заполнение примерами. CRUD и бронирование через ORM добавим следующим чанком.
 План занятия и этапы реализации описаны в [docs/practice_plan.md](docs/practice_plan.md).
 
 ## Подготовка
@@ -47,8 +48,7 @@ python -m pip install -r requirements.txt
 | Alembic | 1.20.0 | Миграции схемы БД |
 | python-dotenv | 1.2.4 | Загрузка настроек из `.env` |
 
-Версии сверены 19 октября 2026 года. SQLAlchemy 2.1.5 является текущим
-стабильным релизом. Для ORM будем использовать `DeclarativeBase`, `Mapped`,
+Для ORM используем `DeclarativeBase`, `Mapped`,
 `mapped_column`, `select()` и `Session`.
 
 Источники: [релизы SQLAlchemy](https://www.sqlalchemy.org/download.html),
@@ -115,9 +115,9 @@ DATABASE_URL=postgresql://ticket_student:password@localhost:5432/ticket_booking_
 Если пароль содержит специальные символы URL, их нужно кодировать:
 например, `@` записывается как `%40`.
 
-На этапе ORM в строке подключения заменим имя базы на `ticket_booking_orm`.
-Префикс `postgresql://` оставим общим для обеих версий; при создании движка
-SQLAlchemy явно выберем драйвер Psycopg.
+Для ORM замените имя базы в строке подключения на `ticket_booking_orm`.
+Префикс `postgresql://` остается общим для обеих версий; функция `get_engine()`
+явно выбирает драйвер Psycopg через `postgresql+psycopg`.
 
 ### 4. Проверка подключения
 
@@ -343,6 +343,156 @@ with get_cursor(database_url) as cursor:
 `get_cursor(database_url, row_factory=dict_row)`, как в функциях поиска.
 Каждый вызов по-прежнему создает отдельное соединение и транзакцию.
 Время установления соединения ограничено пятью секундами.
+
+### 10. Модели SQLAlchemy
+
+Модели находятся в `ticket_booking/orm/models.py`: `Event`, `Seat`, `Ticket`.
+Каждый класс описывает таблицу, а его экземпляр представляет запись.
+Используем современный декларативный стиль SQLAlchemy:
+
+- `Base(DeclarativeBase)` хранит общее описание таблиц в `Base.metadata`.
+- `Mapped[int]`, `Mapped[str]`, `Mapped[datetime]` задают типы полей.
+  Без `None` в аннотации колонка получает `NOT NULL`.
+- `mapped_column()` задает параметры колонки: например, первичный ключ
+  или ограничение длины строки. Целочисленный `primary_key=True` в нашей
+  схеме PostgreSQL создает `SERIAL`.
+- `ForeignKey`, `CheckConstraint`, `UniqueConstraint` описывают те же
+  ограничения, что и в `schema.sql`.
+- `relationship()` позволяет переходить между объектами: `event.seats`,
+  `seat.event`, `seat.ticket`, `ticket.seat`. Связь `Seat.ticket` допускает `None`,
+  поскольку у свободного места нет билета; колонка `tickets.seat_id` обязательна.
+- `back_populates` связывает два направления отношения. `passive_deletes="all"`
+  оставляет удаление связей базе данных: сохраняются правила `CASCADE` и `RESTRICT`.
+
+Подробнее: [модели и Session](https://docs.sqlalchemy.org/en/21/orm/quickstart.html),
+[удаление связанных объектов](https://docs.sqlalchemy.org/en/21/orm/cascades.html#passive-deletes).
+
+### 11. Первая миграция Alembic
+
+Обновите зависимости:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Переключите `DATABASE_URL` в `.env` на изначально пустую базу `ticket_booking_orm`.
+Если переменная уже задана в окружении терминала или PyCharm, обновите и ее:
+она имеет приоритет над `.env`.
+
+```dotenv
+DATABASE_URL=postgresql://ticket_student:password@localhost:5432/ticket_booking_orm
+```
+
+Миграции создают таблицы; базу PostgreSQL предварительно создайте на шаге 2.
+При работе с ORM таблицы создаем через Alembic. Заполняем их отдельной функцией
+`seed_data()` после применения миграции.
+
+В проекте уже есть настроенное окружение Alembic:
+
+- `alembic.ini` задает каталог миграций и вывод сообщений.
+- `migrations/env.py` получает подключение из `.env` и описание таблиц
+  из `Base.metadata`.
+- `migrations/versions/0001_create_ticket_tables.py` содержит первую миграцию:
+  `upgrade()` создает три таблицы, `downgrade()` удаляет их в обратном порядке.
+- `migrations/script.py.mako` служит шаблоном новых миграций.
+
+На уроке создаем и применяем миграцию вручную, выполняя каждый шаг в терминале.
+Для воспроизведения этого этапа начинаем с версии проекта перед добавлением
+ORM (коммит `6d2c5bf`), затем пишем модели и настраиваем Alembic.
+
+1. Создаем стандартное окружение Alembic из корня проекта:
+
+   ```bash
+   python -m alembic init migrations
+   ```
+
+2. Разбираем созданные файлы и настраиваем пути в `alembic.ini`.
+   Строку подключения получаем из `.env` через общий `get_database_url()`.
+
+3. Редактируем `migrations/env.py`: импортируем `Base` из ORM-моделей
+   и задаем `target_metadata = Base.metadata`. Для подключения используем
+   `get_engine(get_database_url())`. Пример итоговой настройки находится
+   в [migrations/env.py](migrations/env.py).
+
+4. Генерируем первую миграцию по написанным моделям:
+
+   ```bash
+   python -m alembic revision --autogenerate --rev-id 0001 -m "create ticket tables"
+   ```
+
+5. Открываем созданный файл в `migrations/versions/` и просматриваем
+   `upgrade()` и `downgrade()`: порядок таблиц, поля, внешние ключи,
+   проверки и уникальность. Генерация файла еще не применяет миграцию к базе.
+
+6. Отдельно применяем миграцию и проверяем результат:
+
+   ```bash
+   python -m alembic upgrade head
+   python -m alembic current
+   python -m alembic check
+   ```
+
+`upgrade head` применяет миграции, `current` показывает текущую версию (`0001`),
+`check` проверяет, видит ли Alembic изменения схемы относительно моделей.
+В базе также появится служебная таблица `alembic_version`.
+
+В готовом репозитории окружение и миграция уже сохранены как результат этих
+шагов. Для запуска этой версии достаточно выполнить:
+
+```bash
+python -m alembic upgrade head
+python -m alembic current
+python -m alembic check
+```
+
+Повторять `init` и генерацию первой миграции в готовой версии не требуется.
+Подробнее: [руководство Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html),
+[автоматическая генерация](https://alembic.sqlalchemy.org/en/latest/autogenerate.html).
+
+### 12. Движок, Session и заполнение через ORM
+
+После применения миграции откройте консоль Python:
+
+```pycon
+>>> from ticket_booking.config import get_database_url
+>>> from ticket_booking.orm.database import get_engine
+>>> from ticket_booking.orm.init_db import seed_data
+>>> engine = get_engine(get_database_url())
+>>> seed_data(engine)
+```
+
+`get_engine()` создает движок SQLAlchemy. Само создание движка не устанавливает
+соединение: оно потребуется при первом обращении к базе. Движок можно один раз
+создать в консоли и передавать в ORM-функции.
+
+`seed_data()` вызываем один раз на пустых таблицах. Функция создает объекты
+двух мероприятий, 12 мест и одного билета. Связи задаются через атрибуты
+`seats` и `ticket`; SQLAlchemy самостоятельно подставляет внешние ключи.
+`session.add_all()` добавляет объекты в сессию, `session.commit()` сохраняет
+их в базе. Блок `with Session(engine)` закрывает сессию; сохранение изменений
+в этом примере выполняет явный `commit()`.
+
+Проверим записи и связи:
+
+```pycon
+>>> from sqlalchemy import select
+>>> from sqlalchemy.orm import Session
+>>> from ticket_booking.orm.models import Event, Seat, Ticket
+>>> with Session(engine) as session:
+...     ticket = session.scalars(select(Ticket)).one()
+...     print(ticket.customer_name)
+...     print(ticket.seat.event.title)
+...     print(ticket.seat.row_number, ticket.seat.seat_number)
+...
+Анна Смирнова
+Джазовый вечер
+1 1
+>>> engine.dispose()
+```
+
+`select(Ticket)` описывает запрос, `session.scalars()` получает объекты модели,
+а `one()` ожидает ровно один результат. Связанные объекты читаем внутри открытой
+сессии. `engine.dispose()` освобождает оставшиеся соединения движка при завершении работы.
 
 ## Учебные границы
 

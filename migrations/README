@@ -1,0 +1,8 @@
+Миграции схемы базы данных для версии на SQLAlchemy.
+
+Строка подключения читается из DATABASE_URL через общий config.py.
+Перед применением миграций выберите базу ticket_booking_orm в .env.
+
+Применить миграции: python -m alembic upgrade head
+Проверить версию: python -m alembic current
+Проверить соответствие моделям: python -m alembic check
