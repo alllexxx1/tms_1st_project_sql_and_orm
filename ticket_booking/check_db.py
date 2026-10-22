@@ -5,6 +5,7 @@ import sys
 import psycopg
 
 from ticket_booking.config import get_database_url
+from ticket_booking.raw_sql.database import get_cursor
 
 
 def main() -> int:
@@ -15,10 +16,9 @@ def main() -> int:
         return 1
 
     try:
-        with psycopg.connect(database_url, connect_timeout=5) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT current_database(), current_user")
-                database_name, user_name = cursor.fetchone()
+        with get_cursor(database_url) as cursor:
+            cursor.execute("SELECT current_database(), current_user")
+            database_name, user_name = cursor.fetchone()
     except psycopg.Error:
         print(
             "Не удалось подключиться к PostgreSQL. Проверьте, что сервер запущен, "
