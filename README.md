@@ -10,8 +10,9 @@
 
 ## Текущий этап
 
-Подготовлено окружение проекта и команда проверки подключения к PostgreSQL.
-Таблицы, операции бронирования и консольное меню добавим следующими коммитами.
+Подготовлено окружение, проверка подключения и инициализация raw SQL-базы:
+три таблицы с ограничениями и демонстрационные данные.
+Операции приложения и консольное меню добавим следующими коммитами.
 План занятия и этапы реализации описаны в [docs/practice_plan.md](docs/practice_plan.md).
 
 ## Подготовка
@@ -95,7 +96,7 @@ Copy-Item .env.example .env
 Укажите в `.env` строку подключения к своей учебной базе:
 
 ```dotenv
-DATABASE_URL=postgresql://ticket_student:student_password@localhost:5432/ticket_booking_raw
+DATABASE_URL=postgresql://ticket_student:password@localhost:5432/ticket_booking_raw
 ```
 
 Перед подключением `python-dotenv` загружает значения из `.env` в окружение
@@ -133,6 +134,98 @@ python -m ticket_booking.check_db
 Команда выполняет только `SELECT current_database(), current_user`.
 При отсутствии `DATABASE_URL` или ошибке подключения выводится сообщение
 и программа завершается с кодом 1. При успехе код завершения равен 0.
+
+### 5. Создание таблиц и демонстрационных данных
+
+Убедитесь, что `DATABASE_URL` указывает на пустую базу `ticket_booking_raw`.
+Из корня проекта откройте консоль Python:
+
+```bash
+python
+```
+
+Импортируйте функции и прочитайте настройки из `.env`:
+
+```pycon
+>>> from ticket_booking.config import get_database_url
+>>> from ticket_booking.raw_sql.init_db import create_tables, seed_data
+>>> database_url = get_database_url()
+```
+
+Создайте таблицы:
+
+```pycon
+>>> create_tables(database_url)
+```
+
+Затем отдельно добавьте демонстрационные данные:
+
+```pycon
+>>> seed_data(database_url)
+```
+
+После заполнения в базе будут 2 мероприятия, 12 мест и 1 билет.
+Функции при успешном выполнении ничего не выводят.
+
+Функции создают таблицы и записи внутри базы PostgreSQL. Сама база должна
+быть создана на шаге 2. Версия ORM будет использовать свою базу и миграции Alembic.
+
+В `init_db.py` за эти действия отвечают отдельные функции:
+
+- `create_tables(database_url)` выполняет `ticket_booking/raw_sql/sql/schema.sql`.
+- `seed_data(database_url)` выполняет
+  `ticket_booking/raw_sql/sql/seed.sql`. В нем находятся все запросы заполнения.
+  Связанные ID берутся из таблиц через `INSERT ... SELECT` и JOIN.
+
+Каждая функция открывает собственное соединение через `with psycopg.connect(...)`
+и выполняется в отдельной транзакции. Ошибка заполнения откатывает вставленные
+данные, но ранее созданные таблицы сохраняются. `SERIAL` может пропускать номера
+после отката, поэтому ID не задаются вручную и не предполагаются равными 1 и 2.
+Подробнее: [транзакции Psycopg](https://www.psycopg.org/psycopg3/docs/basic/transactions.html).
+
+Эти функции вызываем один раз при подготовке пустой учебной базы.
+Ошибки выполнения SQL передаются вызывающему коду как исключения Psycopg.
+
+В схеме ID объявлены как `SERIAL PRIMARY KEY`: PostgreSQL автоматически
+генерирует целочисленные значения с помощью последовательности.
+Подробнее: [тип SERIAL](https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-SERIAL).
+
+Все даты в учебной модели храним как местное время одной площадки,
+без часового пояса (`TIMESTAMP`). Расписание нескольких часовых поясов
+в эту практику не входит.
+
+### 6. Просмотр данных через SQL-клиент
+
+Подключитесь к `ticket_booking_raw`. Проверьте количество записей:
+
+```sql
+SELECT COUNT(*) FROM events;  -- 2
+SELECT COUNT(*) FROM seats;   -- 12
+SELECT COUNT(*) FROM tickets; -- 1
+```
+
+Соедините три таблицы, чтобы увидеть, на какое мероприятие оформлен билет:
+
+```sql
+SELECT
+    events.title,
+    seats.row_number,
+    seats.seat_number,
+    tickets.customer_name
+FROM tickets
+JOIN seats ON seats.id = tickets.seat_id
+JOIN events ON events.id = seats.event_id;
+```
+
+Результат: «Джазовый вечер», ряд 1, место 1, Анна Смирнова.
+
+Ограничения схемы не позволяют повторить место внутри мероприятия,
+дважды забронировать место или указать несуществующий внешний ключ.
+Место с билетом нельзя удалить; удаление мероприятия с билетом также
+будет отклонено. Мероприятие без билетов удаляется вместе со своими местами.
+За это отвечают `UNIQUE`, `FOREIGN KEY`, `ON DELETE CASCADE` и `ON DELETE RESTRICT`.
+Номера больше нуля и непустые строки проверяются через `CHECK`.
+Подробнее: [ограничения PostgreSQL](https://www.postgresql.org/docs/current/ddl-constraints.html).
 
 ## Учебные границы
 

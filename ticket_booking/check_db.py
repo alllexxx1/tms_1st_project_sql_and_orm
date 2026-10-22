@@ -1,19 +1,17 @@
 """Проверка подключения: python -m ticket_booking.check_db."""
 
-import os
 import sys
-from pathlib import Path
 
 import psycopg
-from dotenv import load_dotenv
+
+from ticket_booking.config import get_database_url
 
 
 def main() -> int:
-    load_dotenv()
-    database_url = os.getenv("DATABASE_URL")
-    print(database_url)
-    if not database_url:
-        print("Задайте DATABASE_URL в .env")
+    try:
+        database_url = get_database_url()
+    except ValueError as error:
+        print(error, file=sys.stderr)
         return 1
 
     try:
