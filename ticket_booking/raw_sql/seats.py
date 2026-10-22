@@ -15,6 +15,19 @@ def list_seats(database_url: str, event_id: int) -> list[dict]:
             return cursor.fetchall()
 
 
+def list_free_seats(database_url: str, event_id: int) -> list[dict]:
+    with psycopg.connect(database_url, row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT seats.id, seats.event_id, seats.row_number, seats.seat_number "
+                "FROM seats LEFT JOIN tickets ON tickets.seat_id = seats.id "
+                "WHERE seats.event_id = %s AND tickets.id IS NULL "
+                "ORDER BY seats.row_number, seats.seat_number",
+                (event_id,),
+            )
+            return cursor.fetchall()
+
+
 def find_seat(
     database_url: str, event_id: int, row_number: int, seat_number: int
 ) -> dict | None:
