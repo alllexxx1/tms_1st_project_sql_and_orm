@@ -12,8 +12,9 @@
 
 Версия на raw SQL готова: CRUD мероприятий и мест, поиск, свободные места,
 бронирование и отмена билетов. Все операции вызываем как отдельные функции
-из консоли Python. Для ORM подготовлены модели, первая миграция Alembic
-и заполнение примерами. CRUD и бронирование через ORM добавим следующим чанком.
+из консоли Python. В ORM-версии реализованы те же операции, подготовлены модели,
+первая миграция Alembic и заполнение примерами. Следующим шагом добавим поле
+описания мероприятия и вторую миграцию.
 План занятия и этапы реализации описаны в [docs/practice_plan.md](docs/practice_plan.md).
 
 ## Подготовка
@@ -494,6 +495,131 @@ python -m alembic check
 а `one()` ожидает ровно один результат. Связанные объекты читаем внутри открытой
 сессии. `engine.dispose()` освобождает оставшиеся соединения движка при завершении работы.
 
+### 13. CRUD и поиск через ORM
+
+Откройте новую консоль Python после применения миграции и заполнения ORM-базы:
+
+```pycon
+>>> from datetime import datetime
+>>> from ticket_booking.config import get_database_url
+>>> from ticket_booking.orm.database import get_engine
+>>> from ticket_booking.orm import events, seats, tickets
+>>> engine = get_engine(get_database_url())
+>>> all_events = events.list_events(engine)
+>>> print(all_events[0].title)
+Джазовый вечер
+>>> jazz_events = events.search_events(engine, title_part="джаз")
+>>> small_hall_events = events.search_events(engine, venue_part="Малый")
+>>> matching_events = events.find_events_by_seat(engine, 1, 1)
+>>> event_id = events.add_event(engine, "Встреча с автором", "Малый зал", datetime(2026, 12, 1, 18, 0))
+>>> seat_id = seats.add_seat(engine, event_id, 1, 1)
+>>> event_seats = seats.list_seats(engine, event_id)
+>>> seat = seats.find_seat(engine, event_id, 1, 1)
+>>> print(seat.row_number, seat.seat_number)
+1 1
+>>> events.update_event(engine, event_id, "Встреча с писателем", "Малый зал", datetime(2026, 12, 1, 19, 0))
+True
+>>> seats.update_seat(engine, seat_id, 1, 2)
+True
+>>> seats.delete_seat(engine, seat_id)
+True
+>>> events.delete_event(engine, event_id)
+True
+```
+
+В ORM-функции передаем общий `engine`. Каждая функция открывает свою сессию.
+Функции чтения мероприятий и мест возвращают объекты `Event` и `Seat`,
+поэтому вместо `seat["row_number"]` пишем `seat.row_number`.
+Поиск одного места возвращает `Seat` или `None`; выборки нескольких объектов
+возвращают списки. Добавление возвращает ID, изменение и удаление – `bool`,
+как в SQL-версии.
+
+После возврата из функции сессия уже закрыта. Прочитанные поля объекта доступны,
+но для загрузки связей вроде `event.seats` нужна открытая сессия, как на шаге 12.
+Изменение атрибута возвращенного объекта само по себе не сохраняет его в базе:
+для этого вызываем соответствующую функцию изменения.
+
+Разберите `add_event()` и `update_event()`:
+
+- `session.add(event)` добавляет новый объект в сессию.
+- `session.flush()` выполняет INSERT и получает сгенерированный ID.
+  Он еще не фиксирует транзакцию. Сохраняем ID в локальную переменную.
+- `session.commit()` фиксирует изменения; возвращаем сохраненный ID.
+- `session.get(Event, event_id)` ищет объект по первичному ключу или возвращает `None`.
+- Изменение полей загруженного объекта приводит к UPDATE при сохранении.
+- `session.delete(event)` отмечает объект для удаления, `commit()` сохраняет DELETE.
+
+`with Session(engine)` закрывает сессию, но сам по себе не делает `commit()`.
+При выходе незавершенная транзакция откатывается. Поэтому в функциях записи
+явно вызываем `commit()`, а в функциях чтения он не нужен.
+Подробнее: [работа с Session](https://docs.sqlalchemy.org/en/21/orm/session_basics.html).
+
+Сравните запросы двух реализаций:
+
+| Raw SQL | SQLAlchemy |
+| --- | --- |
+| `SELECT ... FROM events` | `select(Event)` и `session.scalars()` |
+| `WHERE title ILIKE %s` | `.where(Event.title.ilike(...))` |
+| `JOIN seats ON ...` | `.join(Event.seats)` |
+| `LEFT JOIN tickets ... WHERE tickets.id IS NULL` | `.outerjoin(Seat.ticket)` и `Ticket.id.is_(None)` |
+| `ORDER BY starts_at, id` | `.order_by(Event.starts_at, Event.id)` |
+
+Несколько условий в `where()` соединяются через AND. Значения в выражениях
+SQLAlchemy передаются в запрос как параметры. Поиск сохраняет правила
+SQL-версии: пустой фильтр допускает любое значение, `%` и `_` работают как
+шаблоны, поиск по ряду и номеру учитывает также занятые места.
+Подробнее: [запросы ORM и JOIN](https://docs.sqlalchemy.org/en/21/orm/queryguide/select.html).
+
+### 14. Бронирование через ORM
+
+В той же консоли выполните сценарий из SQL-версии:
+
+```pycon
+>>> event_id = events.add_event(engine, "Учебный концерт", "Малый зал", datetime(2026, 12, 2, 19, 0))
+>>> seat_id = seats.add_seat(engine, event_id, 1, 1)
+>>> ticket_id = tickets.book_ticket(engine, seat_id, "Анна Смирнова")
+>>> seats.list_free_seats(engine, event_id)
+[]
+>>> booked_tickets = tickets.list_tickets(engine, event_id)
+>>> print(booked_tickets[0]["customer_name"])
+Анна Смирнова
+>>> try:
+...     tickets.book_ticket(engine, seat_id, "Другой покупатель")
+... except ValueError as error:
+...     print(error)
+...
+Место уже забронировано.
+>>> tickets.cancel_ticket(engine, ticket_id)
+True
+>>> print(seats.list_free_seats(engine, event_id)[0].seat_number)
+1
+>>> ticket_id = tickets.book_ticket(engine, seat_id, "Анна Смирнова")
+>>> tickets.cancel_ticket(engine, ticket_id)
+True
+>>> events.delete_event(engine, event_id)
+True
+>>> engine.dispose()
+```
+
+В `list_tickets()` выбираем отдельные колонки из трех таблиц и соединяем
+их через `.join(Ticket.seat).join(Seat.event)`. Метод `.mappings()` дает строки
+с доступом по именам колонок; преобразуем их в обычные словари. Формат этого
+результата совпадает с SQL-версией, например `ticket["title"]` и `ticket["seat_number"]`.
+
+Уникальность `tickets.seat_id` защищает бронирование в обеих реализациях.
+SQLAlchemy оборачивает ошибку драйвера в `IntegrityError`; исходная ошибка
+Psycopg находится в `error.orig`. Только `UniqueViolation` преобразуем в
+`ValueError("Место уже забронировано.")`, остальные ошибки передаем вызывающему коду.
+Обработка находится после выхода из `with`, когда сессия уже закрыта
+и незавершенная транзакция отменена. После ошибки можно продолжать вызывать функции.
+
+Как и в SQL-версии, нельзя менять площадку мероприятия с билетами или
+редактировать занятое место: функции вызывают `ValueError`.
+Удаление места с билетом и мероприятия с билетами отклоняет внешний ключ,
+и ORM передает `IntegrityError`. Свободное мероприятие удаляется вместе с местами.
+Другие нарушения ограничений таблиц также передаются как `IntegrityError`.
+Подробнее: [исключения SQLAlchemy](https://docs.sqlalchemy.org/en/21/core/exceptions.html#sqlalchemy.exc.IntegrityError).
+
 ## Учебные границы
 
 Храним мероприятия, их пронумерованные места и действующие билеты.
@@ -506,3 +632,5 @@ python -m alembic check
 
 Оплату, регистрацию пользователей, временные брони и историю отмен оставим
 за рамками занятия. Используем синхронный код и небольшие функции.
+
+![Таблица authors](скрины/authors.png)
